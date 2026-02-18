@@ -20,6 +20,8 @@
 
 Quick Note: for putting together this document I wrote notes as I went about development including decisions, best practices I was adhearing to, trade-offs, bug ect. Then I passed those notes through an LLM to generate a readable and well formatted reflection of those thoughts which you see here in the document.
 
+I also wrote a second test suite (`__tests__/e2e.test.ts`) with 57 additional tests covering every route end-to-end — full CRUD lifecycles for products and variants, every error state I could think of (missing fields, bad values, duplicate SKUs, non-existent IDs, last-variant guard, etc.), search and category filtering, aggregate field presence, transaction atomicity (verifying the product row doesn't persist if a variant insert fails), and boundary conditions like zero price/inventory, whitespace trimming, and null categories. All 74 tests (57 E2E + 16 task + 1 health) pass.
+
 ### Task 1 — Create Product
 
 Built the full create product flow end-to-end — a `POST /api/products` route on the backend and a React form on the frontend at `/products/new`.
