@@ -32,7 +32,7 @@ router.get("/", (req, res) => {
       LEFT JOIN variants v ON v.product_id = p.id
     `;
 
-    const conditions: string[] = [];
+    const conditions: string[] = ["p.deleted_at IS NULL"];
     const params: unknown[] = [];
 
     if (search) {
@@ -107,16 +107,146 @@ router.get("/:id", (req, res) => {
  *   ]
  * }
  */
-router.post("/", (_req, res) => {
-  // TODO: Implement product creation
-  // 1. Validate required fields (name is required, variants array must have at least one entry)
-  // 2. Validate each variant (sku required + unique, price_cents >= 0, inventory_count >= 0)
-  // 3. Insert product and variants inside a transaction
-  // 4. Return the created product with its variants
-  res.status(501).json({
-    error: "Not implemented",
-    hint: "Implement product creation with validation and a database transaction",
-  });
+router.post("/", (req, res) => {
+  try {
+    const { name, description, category_id, status, variants } = req.body;
+
+    // --- Field-level validation ---
+    if (!name || typeof name !== "string" || name.trim().length === 0) {
+      return res.status(400).json({ error: "Product name is required" });
+    }
+
+    if (!Array.isArray(variants) || variants.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "At least one variant is required" });
+    }
+
+    // Validate status enum when provided
+    const validStatuses = ["active", "draft", "archived"];
+    const productStatus = status ?? "active";
+    if (!validStatuses.includes(productStatus)) {
+      return res.status(400).json({
+        error: `Invalid status. Must be one of: ${validStatuses.join(", ")}`,
+      });
+    }
+
+    // Validate category exists when provided
+    if (category_id != null) {
+      const category = db
+        .prepare("SELECT id FROM categories WHERE id = ?")
+        .get(Number(category_id));
+      if (!category) {
+        return res.status(400).json({ error: "Category not found" });
+      }
+    }
+
+    // Validate each variant
+    const skusInRequest = new Set<string>();
+    for (let i = 0; i < variants.length; i++) {
+      const v = variants[i];
+
+      if (!v.sku || typeof v.sku !== "string" || v.sku.trim().length === 0) {
+        return res
+          .status(400)
+          .json({ error: `Variant at index ${i} is missing a SKU` });
+      }
+
+      if (!v.name || typeof v.name !== "string" || v.name.trim().length === 0) {
+        return res
+          .status(400)
+          .json({ error: `Variant at index ${i} is missing a name` });
+      }
+
+      if (v.price_cents != null && (typeof v.price_cents !== "number" || v.price_cents < 0)) {
+        return res
+          .status(400)
+          .json({ error: `Variant at index ${i} has an invalid price (must be >= 0)` });
+      }
+
+      if (
+        v.inventory_count != null &&
+        (typeof v.inventory_count !== "number" || v.inventory_count < 0)
+      ) {
+        return res.status(400).json({
+          error: `Variant at index ${i} has an invalid inventory count (must be >= 0)`,
+        });
+      }
+
+      // Check for duplicate SKUs within the request body
+      const normalizedSku = v.sku.trim();
+      if (skusInRequest.has(normalizedSku)) {
+        return res
+          .status(400)
+          .json({ error: `Duplicate SKU "${normalizedSku}" within request` });
+      }
+      skusInRequest.add(normalizedSku);
+
+      // Check for SKU uniqueness against the database
+      const existing = db
+        .prepare("SELECT id FROM variants WHERE sku = ?")
+        .get(normalizedSku);
+      if (existing) {
+        return res
+          .status(409)
+          .json({ error: `SKU "${normalizedSku}" already exists` });
+      }
+    }
+
+    // --- Transactional insert ---
+    const insertProduct = db.prepare(
+      `INSERT INTO products (name, description, category_id, status)
+       VALUES (?, ?, ?, ?)`
+    );
+
+    const insertVariant = db.prepare(
+      `INSERT INTO variants (product_id, sku, name, price_cents, inventory_count)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+
+    const createProductTransaction = db.transaction(() => {
+      const result = insertProduct.run(
+        name.trim(),
+        description ?? null,
+        category_id ?? null,
+        productStatus
+      );
+      const productId = Number(result.lastInsertRowid);
+
+      for (const v of variants) {
+        insertVariant.run(
+          productId,
+          v.sku.trim(),
+          v.name.trim(),
+          v.price_cents ?? 0,
+          v.inventory_count ?? 0
+        );
+      }
+
+      return productId;
+    });
+
+    const productId = createProductTransaction();
+
+    // --- Return the created product with variants ---
+    const product = db
+      .prepare(
+        `SELECT p.*, c.name AS category_name
+         FROM products p
+         LEFT JOIN categories c ON p.category_id = c.id
+         WHERE p.id = ?`
+      )
+      .get(productId) as Record<string, unknown>;
+
+    const createdVariants = db
+      .prepare("SELECT * FROM variants WHERE product_id = ? ORDER BY created_at ASC")
+      .all(productId);
+
+    res.status(201).json({ ...product, variants: createdVariants });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
 });
 
 /**

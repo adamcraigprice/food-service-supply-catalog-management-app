@@ -36,16 +36,90 @@ router.get("/:id", (req, res) => {
  *   "inventory_count": 50
  * }
  */
-router.put("/:id", (_req, res) => {
-  // TODO: Implement variant update
-  // 1. Validate that the variant exists
-  // 2. Validate: price_cents >= 0, inventory_count >= 0, sku is unique (if changed)
-  // 3. Update the variant in the database
-  // 4. Return the updated variant
-  res.status(501).json({
-    error: "Not implemented",
-    hint: "Implement variant update with validation",
-  });
+router.put("/:id", (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { name, sku, price_cents, inventory_count } = req.body;
+
+    // 1. Verify the variant exists
+    const existing = db
+      .prepare("SELECT * FROM variants WHERE id = ?")
+      .get(id) as Record<string, unknown> | undefined;
+
+    if (!existing) {
+      return res.status(404).json({ error: "Variant not found" });
+    }
+
+    // 2. Validate fields (only those provided)
+    if (name !== undefined && (typeof name !== "string" || name.trim().length === 0)) {
+      return res.status(400).json({ error: "Variant name must be a non-empty string" });
+    }
+
+    if (sku !== undefined && (typeof sku !== "string" || sku.trim().length === 0)) {
+      return res.status(400).json({ error: "SKU must be a non-empty string" });
+    }
+
+    if (price_cents !== undefined) {
+      if (typeof price_cents !== "number" || price_cents < 0) {
+        return res.status(400).json({ error: "price_cents must be a number >= 0" });
+      }
+    }
+
+    if (inventory_count !== undefined) {
+      if (typeof inventory_count !== "number" || inventory_count < 0) {
+        return res.status(400).json({ error: "inventory_count must be a number >= 0" });
+      }
+    }
+
+    // 3. If SKU is being changed, ensure uniqueness
+    if (sku !== undefined && sku.trim() !== existing.sku) {
+      const conflict = db
+        .prepare("SELECT id FROM variants WHERE sku = ? AND id != ?")
+        .get(sku.trim(), id);
+      if (conflict) {
+        return res.status(409).json({ error: `SKU "${sku.trim()}" already exists` });
+      }
+    }
+
+    // 4. Build a partial update — only touch supplied fields
+    const updates: string[] = [];
+    const params: unknown[] = [];
+
+    if (name !== undefined) {
+      updates.push("name = ?");
+      params.push(name.trim());
+    }
+    if (sku !== undefined) {
+      updates.push("sku = ?");
+      params.push(sku.trim());
+    }
+    if (price_cents !== undefined) {
+      updates.push("price_cents = ?");
+      params.push(price_cents);
+    }
+    if (inventory_count !== undefined) {
+      updates.push("inventory_count = ?");
+      params.push(inventory_count);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No fields provided to update" });
+    }
+
+    updates.push("updated_at = datetime('now')");
+    params.push(id);
+
+    db.prepare(
+      `UPDATE variants SET ${updates.join(", ")} WHERE id = ?`
+    ).run(...params);
+
+    // 5. Return the updated variant
+    const updated = db.prepare("SELECT * FROM variants WHERE id = ?").get(id);
+    res.json(updated);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
 });
 
 /**
